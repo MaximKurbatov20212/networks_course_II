@@ -16,12 +16,31 @@
 #define SUCCESS 0 
 #define SELECT_ERROR -1
 #define MSGBUFSIZE 256
+#define DELAY 1 
 
 struct my_socket {
     int sockfd;
     struct sockaddr_in addr;
     my_socket(int fd, sockaddr_in addr): sockfd(fd), addr(addr) {}
 };
+
+namespace utilits {
+typedef struct user {
+    std::string name;
+    int born_time;
+    user(const std::string& name, const int time) : name(name), born_time(time) {}
+
+    bool operator==(struct user user) {
+        std::cout << this->name <<  " " << user.name << std::endl;
+        return this->name == user.name;
+    }
+
+    bool operator!=(struct user user) {
+        return this->name != user.name;
+    }
+
+} user;
+}
 
 struct my_socket create_send_socket(char* group, int port) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -79,14 +98,6 @@ struct my_socket create_receive_socket(char* group, int port) {
     return my_socket(fd, addr);
 }
 
-void print_users(std::vector<std::string>& users) {
-    for (auto i : users) {
-        std::cout << i << std::endl;
-    }
-    std::cout << std::endl;
-    users.clear();
-}
-
 void receive(const my_socket& receive_socket, char* msgbuf) {
     unsigned int addrlen = sizeof(receive_socket.addr);
     int nbytes = recvfrom(receive_socket.sockfd, msgbuf, MSGBUFSIZE, 0, (struct sockaddr *) &receive_socket.addr, &addrlen);
@@ -97,66 +108,132 @@ void receive(const my_socket& receive_socket, char* msgbuf) {
     }
 }
 
+bool check_new(utilits::user user, std::vector<utilits::user>& users) {
+    std::vector<utilits::user>::iterator it = users.begin();
+    std::vector<utilits::user>::iterator end = users.end();
+
+    while (it != end) {
+        if ((*it).name == user.name) {
+            (*it).born_time = time(nullptr);
+            return false;
+        }
+        it++;
+    }
+    return true;
+}
+
+bool check_old(std::vector<utilits::user>& users) {
+    bool has_disconnected_users = false;
+
+    std::vector<utilits::user>::iterator it = users.begin();
+    std::vector<utilits::user>::iterator end = users.end();
+
+    while (it != end) {
+        if (time(nullptr) - (*it).born_time > 3 * DELAY) {
+            users.erase(it);
+            has_disconnected_users = true;
+        }
+        it++;
+    }
+    return has_disconnected_users;
+}
+
+bool send_msg(my_socket send_socket, const char* message) {
+    int nbytes = sendto(send_socket.sockfd, 
+                    message, 
+                    strlen(message), 
+                    0, 
+                    (struct sockaddr*) &send_socket.addr, 
+                    sizeof(send_socket.addr));
+
+    if (nbytes < 0) {
+        perror("sendto");
+        return false;
+    }
+
+    return true;
+}
+
+utilits::user receive_msg(my_socket send_socket, my_socket receive_socket) {
+    char msgbuf[MSGBUFSIZE];
+
+    fd_set read_flag;
+    struct timeval tv;
+
+    tv.tv_sec = DELAY;
+    tv.tv_usec = 0;
+
+    FD_ZERO(&read_flag);
+    FD_SET(receive_socket.sockfd, &read_flag);
+  
+    int res_select = select(receive_socket.sockfd + 1, &read_flag, nullptr, nullptr, &tv);
+
+    if (res_select == -1) {
+        perror("select");
+        close(receive_socket.sockfd);
+        close(send_socket.sockfd);
+        exit(1);
+    }
+
+    if (FD_ISSET(receive_socket.sockfd, &read_flag) > 0) {
+        receive(receive_socket, msgbuf);
+        return utilits::user(std::string(msgbuf), time(nullptr));
+    } 
+    return utilits::user("", -1);
+}
+
+void print_users(std::vector<utilits::user>& users) {
+    std::vector<utilits::user>::iterator it = users.begin();
+    std::vector<utilits::user>::iterator end = users.end();
+
+    while (it != end) {
+        std::cout << (*it).name << std::endl;
+        it++;
+    }
+    std::cout << std::endl;
+}
+
 int main(int argc, char *argv[]) {
     char* group = argv[1]; 
     int port = atoi(argv[2]);
     const char *message = argv[3];
 
-    time_t delay = 0.1;
+    time_t delay = 1;
 
     my_socket send_socket = create_send_socket(group, port);
     my_socket receive_socket = create_receive_socket(group, port);
 
-    fd_set read_flag;
-    struct timeval tv;
 
-    time_t t = time(nullptr), start = time(nullptr);
+    time_t t = time(nullptr);
 
-    char msgbuf[MSGBUFSIZE];
-    int nbytes = 0;
-
-    std::vector<std::string> users;
-
+    std::vector<utilits::user> users;
     while (true) {
+        if (time(nullptr) - t >= DELAY) {
+            bool was_sent = send_msg(send_socket, message);
 
-        if (time(nullptr) - t > delay) {
-            nbytes = sendto(send_socket.sockfd, message, strlen(message), 0, (struct sockaddr*) &send_socket.addr, sizeof(send_socket.addr));
-            if (nbytes < 0) {
-                perror("sendto");
+            if (!was_sent) {
                 close(receive_socket.sockfd);
                 close(send_socket.sockfd);
                 return ERROR;
             }
+
             t = time(nullptr);
         }
 
-        tv.tv_sec = delay;
-        tv.tv_usec = 0;
-
-        FD_ZERO(&read_flag);
-        FD_SET(receive_socket.sockfd, &read_flag);
-      
-        int res_select = select(receive_socket.sockfd + 1, &read_flag, nullptr, nullptr, &tv);
-
-        if (res_select == -1) {
-            perror("select");
-            close(receive_socket.sockfd);
-            close(send_socket.sockfd);
-            return ERROR;
-        }
-
-        if (FD_ISSET(receive_socket.sockfd, &read_flag) > 0) {
-            receive(receive_socket, msgbuf);
-
-            if (std::count(users.begin(), users.end(), std::string(msgbuf)) == 0) {
-                users.push_back(std::string(msgbuf));
-            }
-            msgbuf[0] = 0;
-        }
+        utilits::user new_user = receive_msg(send_socket, receive_socket);
         
-        if (time(nullptr) - start > 3 * delay) {
+        if (new_user.born_time != -1) {
+            bool is_new = check_new(new_user, users);
+            if (is_new) {
+                users.push_back(new_user);
+                print_users(users);
+            } 
+        }
+
+        bool has_disconnected_users = check_old(users);
+
+        if (has_disconnected_users) {
             print_users(users);
-            start = time(nullptr);
         }
     }
 
